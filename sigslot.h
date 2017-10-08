@@ -2,19 +2,19 @@
 #if defined(SIGSLOT_PURE_ISO) || (!defined(WIN32) && !defined(__GNUG__) && !defined(SIGSLOT_USE_POSIX_THREADS))
 #define SIGSLOT_SINGLE_THREADED
 #elif defined(WIN32)
-	#define _SIGSLOT_HAS_WIN32_THREADS
-	#include <windows.h>
+#define SIGSLOT_HAS_WIN32_THREADS
+#include <Windows.h>
 #elif defined(__GNUG__) || defined(SIGSLOT_USE_POSIX_THREADS)
-	#define _SIGSLOT_HAS_POSIX_THREADS
-	#include <pthread.h>
+#define SIGSLOT_HAS_POSIX_THREADS
+#include <pthread.h>
 #else
-	#define _SIGSLOT_SINGLE_THREADED
+#define SIGSLOT_SINGLE_THREADED
 #endif
 #ifndef SIGSLOT_DEFAULT_MT_POLICY
 #ifdef SIGSLOT_SINGLE_THREADED
 #define SIGSLOT_DEFAULT_MT_POLICY single_threaded
 #else
-		#define SIGSLOT_DEFAULT_MT_POLICY multi_threaded_local
+#define SIGSLOT_DEFAULT_MT_POLICY multi_threaded_local
 #endif
 #endif
 #include <set>
@@ -30,34 +30,32 @@ namespace sigslot {
 		virtual void lock(){ }
 		virtual void unlock(){ }
 	};
-#ifdef _SIGSLOT_HAS_WIN32_THREADS
+#ifdef SIGSLOT_HAS_WIN32_THREADS
 	// The multi threading policies only get compiled in if they are enabled.
 	class multi_threaded_global {
 	public:
-		multi_threaded_global() {
-			static bool isinitialised = false;
+		multi_threaded_global(){
+			static auto isinitialised = false;
 
-			if (!isinitialised) {
+			if(!isinitialised) {
 				InitializeCriticalSection(get_critsec());
 				isinitialised = true;
 			}
 		}
 
-		multi_threaded_global(const multi_threaded_global&) {}
+		multi_threaded_global(const multi_threaded_global &){}
+		virtual ~multi_threaded_global(){}
 
-		virtual ~multi_threaded_global() {}
-
-		virtual void lock() {
+		virtual void lock(){
 			EnterCriticalSection(get_critsec());
 		}
 
-		virtual void unlock() {
+		virtual void unlock(){
 			LeaveCriticalSection(get_critsec());
 		}
 
 	private:
-		CRITICAL_SECTION* get_critsec()
-		{
+		static CRITICAL_SECTION * get_critsec(){
 			static CRITICAL_SECTION g_critsec;
 			return &g_critsec;
 		}
@@ -65,23 +63,23 @@ namespace sigslot {
 
 	class multi_threaded_local {
 	public:
-		multi_threaded_local() {
+		multi_threaded_local(){
 			InitializeCriticalSection(&m_critsec);
 		}
 
-		multi_threaded_local(const multi_threaded_local&) {
+		multi_threaded_local(const multi_threaded_local &){
 			InitializeCriticalSection(&m_critsec);
 		}
 
-		virtual ~multi_threaded_local() {
+		virtual ~multi_threaded_local(){
 			DeleteCriticalSection(&m_critsec);
 		}
 
-		virtual void lock() {
+		virtual void lock(){
 			EnterCriticalSection(&m_critsec);
 		}
 
-		virtual void unlock() {
+		virtual void unlock(){
 			LeaveCriticalSection(&m_critsec);
 		}
 
@@ -256,15 +254,8 @@ namespace sigslot {
 		has_slots(){ }
 
 		has_slots(const has_slots & hs) : MtPolicy(hs){
-			sender_set tmp;
-			{
-				lock_block<MtPolicy> lock(hs);
-				tmp.insert(hs.senders_.begin(), hs.senders_.end());
-			}
-			for(auto sender : tmp) {
-				sender->slot_duplicate(&hs, this);
-				senders_.insert(sender);
-			}
+			lock_block<MtPolicy> lock(const_cast<has_slots<MtPolicy> *>(&hs));
+			senders_.insert(hs.senders_.begin(), hs.senders_.end());
 		}
 
 		void signal_connect(signal_base_base<MtPolicy> * sender){
@@ -283,7 +274,7 @@ namespace sigslot {
 
 		void disconnect_all(){
 			lock_block<MtPolicy> lock(this);
-			for(auto sender : senders_) {
+			for(auto && sender : senders_) {
 				sender->slot_disconnect(this);
 			}
 
@@ -300,18 +291,18 @@ namespace sigslot {
 		typedef std::vector<std::shared_ptr<connection_base<MtPolicy,Types...>>> connections_type;
 
 		signal_base(){
-			;
 		}
 
 		signal_base(const signal_base & s) : signal_base_base<MtPolicy>(s){
 			connections_type tmp;
 			{
-				lock_block<MtPolicy> lock(s);
-				tmp.insert(s.connected_slots_.begin(), s.connected_slots_.end());
+				lock_block<MtPolicy> lock(const_cast<signal_base<MtPolicy,Types...> *>(&s));
+				tmp.assign(s.connected_slots_.begin(), s.connected_slots_.end());
 			}
-			for(auto && connect : tmp) {
-				connect->getdest()->signal_connect(this);
-				connected_slots_.push_back(connect->clone());
+			for(auto && conn : tmp) {
+				auto new_conn = conn->clone();
+				new_conn->getdest()->signal_connect(this);
+				connected_slots_.push_back(new_conn);
 			}
 		}
 
@@ -376,13 +367,14 @@ namespace sigslot {
 		signal_base0(const signal_base0 & s) : signal_base_base<MtPolicy>(s){
 			connections_type tmp;
 			{
-				lock_block<MtPolicy> lock(s);
-				tmp.insert(s.connected_slots_.begin(), s.connected_slots_.end());
+				lock_block<MtPolicy> lock(const_cast<signal_base0<MtPolicy>*>(&s));
+				tmp.assign(s.connected_slots_.begin(), s.connected_slots_.end());
 			}
 
-			for(auto connect : tmp) {
-				connect->getdest()->signal_connect(this);
-				connected_slots_.push_back(connect->clone());
+			for(auto && conn : tmp) {
+				auto new_conn = conn->clone();
+				new_conn->getdest()->signal_connect(this);
+				connected_slots_.push_back(new_conn);
 			}
 		}
 
@@ -440,10 +432,10 @@ namespace sigslot {
 	};
 
 	template <typename MtPolicy = SIGSLOT_DEFAULT_MT_POLICY,typename ... Types>
-	class signal : public signal_base<MtPolicy,Types...> {
+	class Signal : public signal_base<MtPolicy,Types...> {
 	public:
-		signal(){ }
-		explicit signal(const signal<MtPolicy,Types...> & s) : signal_base<MtPolicy,Types...>(s){ }
+		Signal(){ }
+		explicit Signal(const Signal<MtPolicy,Types...> & s) : signal_base<MtPolicy,Types...>(s){ }
 
 		template <class DestType>
 		void connect(DestType * pclass,void (DestType::*pmemfun)(Types ...)){
@@ -467,10 +459,10 @@ namespace sigslot {
 	};
 
 	template <class MtPolicy = SIGSLOT_DEFAULT_MT_POLICY>
-	class signal0 : public signal_base0<MtPolicy> {
+	class Signal0 : public signal_base0<MtPolicy> {
 	public:
-		signal0(){ }
-		signal0(const signal0<MtPolicy> & s) : signal_base0<MtPolicy>(s){ }
+		Signal0(){ }
+		Signal0(const Signal0<MtPolicy> & s) : signal_base0<MtPolicy>(s){ }
 
 		template <typename DestType>
 		void connect(DestType * pclass,void (DestType::*pmemfun)()){
