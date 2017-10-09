@@ -1,15 +1,4 @@
 #pragma once
-#if defined(SIGSLOT_PURE_ISO) || (!defined(WIN32) && !defined(__GNUG__) && !defined(SIGSLOT_USE_POSIX_THREADS))
-#define SIGSLOT_SINGLE_THREADED
-#elif defined(WIN32)
-#define SIGSLOT_HAS_WIN32_THREADS
-#include <Windows.h>
-#elif defined(__GNUG__) || defined(SIGSLOT_USE_POSIX_THREADS)
-#define SIGSLOT_HAS_POSIX_THREADS
-#include <pthread.h>
-#else
-#define SIGSLOT_SINGLE_THREADED
-#endif
 #ifndef SIGSLOT_DEFAULT_MT_POLICY
 #ifdef SIGSLOT_SINGLE_THREADED
 #define SIGSLOT_DEFAULT_MT_POLICY single_threaded
@@ -22,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <algorithm>
+#include <mutex>
 namespace sigslot {
 	class single_threaded {
 	public:
@@ -30,117 +20,54 @@ namespace sigslot {
 		virtual void lock(){ }
 		virtual void unlock(){ }
 	};
-#ifdef SIGSLOT_HAS_WIN32_THREADS
-	// The multi threading policies only get compiled in if they are enabled.
-	class multi_threaded_global {
+
+	class multi_threaded_global{
 	public:
 		multi_threaded_global(){
-			static auto isinitialised = false;
-
-			if(!isinitialised) {
-				InitializeCriticalSection(get_critsec());
-				isinitialised = true;
-			}
+			get_critsec();
 		}
 
 		multi_threaded_global(const multi_threaded_global &){}
 		virtual ~multi_threaded_global(){}
 
 		virtual void lock(){
-			EnterCriticalSection(get_critsec());
+			get_critsec().lock();
 		}
 
 		virtual void unlock(){
-			LeaveCriticalSection(get_critsec());
+			get_critsec().unlock();
 		}
 
 	private:
-		static CRITICAL_SECTION * get_critsec(){
-			static CRITICAL_SECTION g_critsec;
-			return &g_critsec;
+		static std::mutex & get_critsec(){
+			static std::mutex mutex;
+			return mutex;
 		}
 	};
 
 	class multi_threaded_local {
 	public:
 		multi_threaded_local(){
-			InitializeCriticalSection(&m_critsec);
 		}
 
 		multi_threaded_local(const multi_threaded_local &){
-			InitializeCriticalSection(&m_critsec);
 		}
 
 		virtual ~multi_threaded_local(){
-			DeleteCriticalSection(&m_critsec);
 		}
 
 		virtual void lock(){
-			EnterCriticalSection(&m_critsec);
+			mutex_.lock();
 		}
 
 		virtual void unlock(){
-			LeaveCriticalSection(&m_critsec);
+			mutex_.unlock();
 		}
 
 	private:
-		CRITICAL_SECTION m_critsec;
-	};
-#endif // _SIGSLOT_HAS_WIN32_THREADS
-#ifdef _SIGSLOT_HAS_POSIX_THREADS
-	// The multi threading policies only get compiled in if they are enabled.
-	class multi_threaded_global {
-	public:
-		multi_threaded_global() {
-			pthread_mutex_init(get_mutex(), NULL);
-		}
-
-		multi_threaded_global(const multi_threaded_global&) {}
-
-		virtual ~multi_threaded_global() {
-		}
-
-		virtual void lock() {
-			pthread_mutex_lock(get_mutex());
-		}
-
-		virtual void unlock() {
-			pthread_mutex_unlock(get_mutex());
-		}
-
-	private:
-		pthread_mutex_t* get_mutex() {
-			static pthread_mutex_t g_mutex;
-			return &g_mutex;
-		}
+		std::mutex mutex_;
 	};
 
-	class multi_threaded_local {
-	public:
-		multi_threaded_local() {
-			pthread_mutex_init(&m_mutex, NULL);
-		}
-
-		multi_threaded_local(const multi_threaded_local&) {
-			pthread_mutex_init(&m_mutex, NULL);
-		}
-
-		virtual ~multi_threaded_local() {
-			pthread_mutex_destroy(&m_mutex);
-		}
-
-		virtual void lock() {
-			pthread_mutex_lock(&m_mutex);
-		}
-
-		virtual void unlock() {
-			pthread_mutex_unlock(&m_mutex);
-		}
-
-	private:
-		pthread_mutex_t m_mutex;
-	};
-#endif // _SIGSLOT_HAS_POSIX_THREADS
 	template <typename MtPolicy>
 	class lock_block {
 	public:
@@ -245,46 +172,6 @@ namespace sigslot {
 		virtual void slot_duplicate(const has_slots<MtPolicy> * poldslot,has_slots<MtPolicy> * pnewslot) = 0;
 	};
 
-	template <typename MtPolicy = SIGSLOT_DEFAULT_MT_POLICY>
-	class has_slots : public MtPolicy {
-	private:
-		typedef std::set<signal_base_base<MtPolicy> *> sender_set;
-		typedef typename sender_set::const_iterator const_iterator;
-	public:
-		has_slots(){ }
-
-		has_slots(const has_slots & hs) : MtPolicy(hs){
-			lock_block<MtPolicy> lock(const_cast<has_slots<MtPolicy> *>(&hs));
-			senders_.insert(hs.senders_.begin(), hs.senders_.end());
-		}
-
-		void signal_connect(signal_base_base<MtPolicy> * sender){
-			lock_block<MtPolicy> lock(this);
-			senders_.insert(sender);
-		}
-
-		void signal_disconnect(signal_base_base<MtPolicy> * sender){
-			lock_block<MtPolicy> lock(this);
-			senders_.erase(sender);
-		}
-
-		virtual ~has_slots(){
-			disconnect_all();
-		}
-
-		void disconnect_all(){
-			lock_block<MtPolicy> lock(this);
-			for(auto && sender : senders_) {
-				sender->slot_disconnect(this);
-			}
-
-			senders_.clear();
-		}
-
-	private:
-		sender_set senders_;
-	};
-
 	template <typename MtPolicy,typename ... Types>
 	class signal_base : public signal_base_base<MtPolicy> {
 	public:
@@ -319,7 +206,8 @@ namespace sigslot {
 			connected_slots_.clear();
 		}
 
-		void disconnect(has_slots<MtPolicy> * pclass){
+		template<typename DestType>
+		void disconnect(DestType* pclass){
 			lock_block<MtPolicy> lock(this);
 			auto it = std::find_if(connected_slots_.begin(), connected_slots_.end(),
 			                       [=](const std::shared_ptr<connection_base<MtPolicy,Types...>> & conn) ->bool
@@ -483,5 +371,82 @@ namespace sigslot {
 		void operator()(){
 			this->emit();
 		}
+	};
+
+	template <typename MtPolicy = SIGSLOT_DEFAULT_MT_POLICY>
+	class has_slots : public MtPolicy {
+		typedef std::set<signal_base_base<MtPolicy> *> sender_set;
+		typedef typename sender_set::const_iterator const_iterator;
+	public:
+		has_slots() { }
+
+		has_slots(const has_slots & hs) : MtPolicy(hs) {
+			lock_block<MtPolicy> lock(const_cast<has_slots<MtPolicy> *>(&hs));
+			senders_.insert(hs.senders_.begin(), hs.senders_.end());
+		}
+
+		virtual ~has_slots() {
+			disconnect_all();
+		}
+
+		void disconnect_all() {
+			lock_block<MtPolicy> lock(this);
+			for (auto && sender : senders_) {
+				sender->slot_disconnect(this);
+			}
+
+			senders_.clear();
+		}
+
+		void signal_connect(signal_base_base<MtPolicy> * sender) {
+			lock_block<MtPolicy> lock(this);
+			senders_.insert(sender);
+		}
+
+		void signal_disconnect(signal_base_base<MtPolicy> * sender) {
+			lock_block<MtPolicy> lock(this);
+			senders_.erase(sender);
+		}
+
+	private:
+		sender_set senders_;
+	};
+
+	template <>
+	class has_slots<multi_threaded_global> : public multi_threaded_global {
+	private:
+		friend signal_base_base<multi_threaded_global>;
+		typedef std::set<signal_base_base<multi_threaded_global> *> sender_set;
+		typedef sender_set::const_iterator const_iterator;
+	public:
+		has_slots() { }
+
+		has_slots(const has_slots & hs) : multi_threaded_global(hs) {
+			lock_block<multi_threaded_global> lock(const_cast<has_slots<multi_threaded_global> *>(&hs));
+			senders_.insert(hs.senders_.begin(), hs.senders_.end());
+		}
+
+		virtual ~has_slots() {
+			disconnect_all();
+		}
+
+		void disconnect_all() {
+			for (auto && sender : senders_) {
+				sender->slot_disconnect(this);
+			}
+
+			senders_.clear();
+		}
+
+		void signal_connect(signal_base_base<multi_threaded_global> * sender) {
+			senders_.insert(sender);
+		}
+
+		void signal_disconnect(signal_base_base<multi_threaded_global> * sender) {
+			senders_.erase(sender);
+		}
+
+	private:
+		sender_set senders_;
 	};
 }
