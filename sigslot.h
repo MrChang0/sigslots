@@ -6,12 +6,14 @@
 #define SIGSLOT_DEFAULT_MT_POLICY multi_threaded_local
 #endif
 #endif
+
 #include <set>
 #include <vector>
 #include <functional>
 #include <memory>
 #include <algorithm>
 #include <mutex>
+
 namespace sigslot {
 	class single_threaded {
 	public:
@@ -181,15 +183,12 @@ namespace sigslot {
 		}
 
 		signal_base(const signal_base & s) : signal_base_base<MtPolicy>(s){
-			connections_type tmp;
-			{
-				lock_block<MtPolicy> lock(const_cast<signal_base<MtPolicy,Types...> *>(&s));
-				tmp.assign(s.connected_slots_.begin(), s.connected_slots_.end());
-			}
-			for(auto && conn : tmp) {
+			lock_block<MtPolicy> lock(const_cast<signal_base<MtPolicy,Types...> *>(&s));
+
+			for(auto && conn : s.connected_slots_) {
 				auto new_conn = conn->clone();
 				new_conn->getdest()->signal_connect(this);
-				connected_slots_.push_back(new_conn);
+				connected_slots_.push_back(std::move(new_conn));
 			}
 		}
 
@@ -206,8 +205,7 @@ namespace sigslot {
 			connected_slots_.clear();
 		}
 
-		template<typename DestType>
-		void disconnect(DestType* pclass){
+		void disconnect(has_slots<MtPolicy> * pclass){
 			lock_block<MtPolicy> lock(this);
 			auto it = std::find_if(connected_slots_.begin(), connected_slots_.end(),
 			                       [=](const std::shared_ptr<connection_base<MtPolicy,Types...>> & conn) ->bool
@@ -253,16 +251,12 @@ namespace sigslot {
 		signal_base0(){ }
 
 		signal_base0(const signal_base0 & s) : signal_base_base<MtPolicy>(s){
-			connections_type tmp;
-			{
-				lock_block<MtPolicy> lock(const_cast<signal_base0<MtPolicy>*>(&s));
-				tmp.assign(s.connected_slots_.begin(), s.connected_slots_.end());
-			}
+			lock_block<MtPolicy> lock(const_cast<signal_base0<MtPolicy>*>(&s));
 
-			for(auto && conn : tmp) {
+			for(auto && conn : s.connected_slots_) {
 				auto new_conn = conn->clone();
 				new_conn->getdest()->signal_connect(this);
-				connected_slots_.push_back(new_conn);
+				connected_slots_.push_back(std::move(new_conn));
 			}
 		}
 
@@ -329,15 +323,14 @@ namespace sigslot {
 		void connect(DestType * pclass,void (DestType::*pmemfun)(Types ...)){
 			lock_block<MtPolicy> lock(this);
 			std::function<void(DestType *,Types ...)> fun(pmemfun);
-			std::shared_ptr<connection_base<MtPolicy,Types...>> conn(new connection<DestType,MtPolicy,Types...>(pclass, fun));
-			signal_base<MtPolicy,Types...>::connected_slots_.push_back(conn);
+			signal_base<MtPolicy,Types...>::connected_slots_.emplace_back(new connection<DestType, MtPolicy, Types...>(pclass, fun));
 			pclass->signal_connect(this);
 		}
 
 		void emit(Types ...args){
 			lock_block<MtPolicy> lock(this);
-			for(auto connection : signal_base<MtPolicy,Types...>::connected_slots_) {
-				connection->emit(args...);
+			for(auto && conn : signal_base<MtPolicy,Types...>::connected_slots_) {
+				conn->emit(args...);
 			}
 		}
 
@@ -356,14 +349,13 @@ namespace sigslot {
 		void connect(DestType * pclass,void (DestType::*pmemfun)()){
 			lock_block<MtPolicy> lock(this);
 			std::function<void(DestType *)> fun(pmemfun);
-			std::shared_ptr<connection_base0<MtPolicy>> conn(new connection0<DestType,MtPolicy>(pclass, fun));
-			signal_base0<MtPolicy>::connected_slots_.push_back(conn);
+			signal_base0<MtPolicy>::connected_slots_.emplace_back(new connection0<DestType, MtPolicy>(pclass, fun));
 			pclass->signal_connect(this);
 		}
 
 		void emit(){
 			lock_block<MtPolicy> lock(this);
-			for(auto conn : signal_base0<MtPolicy>::connected_slots_) {
+			for(auto && conn : signal_base0<MtPolicy>::connected_slots_) {
 				conn->emit();
 			}
 		}
