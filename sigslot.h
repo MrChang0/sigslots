@@ -6,14 +6,12 @@
 #define SIGSLOT_DEFAULT_MT_POLICY multi_threaded_local
 #endif
 #endif
-
 #include <set>
-#include <vector>
 #include <functional>
 #include <memory>
 #include <algorithm>
 #include <mutex>
-
+#include <list>
 namespace sigslot {
 	class single_threaded {
 	public:
@@ -24,7 +22,7 @@ namespace sigslot {
 	};
 
 	// TODO:remove global mutex
-	class multi_threaded_global{
+	class multi_threaded_global {
 	public:
 		multi_threaded_global(){
 			get_critsec();
@@ -50,14 +48,9 @@ namespace sigslot {
 
 	class multi_threaded_local {
 	public:
-		multi_threaded_local(){
-		}
-
-		multi_threaded_local(const multi_threaded_local &){
-		}
-
-		virtual ~multi_threaded_local(){
-		}
+		multi_threaded_local(){ }
+		multi_threaded_local(const multi_threaded_local &){ }
+		virtual ~multi_threaded_local(){ }
 
 		virtual void lock(){
 			mutex_.lock();
@@ -180,12 +173,9 @@ namespace sigslot {
 
 	template <typename MtPolicy,typename ... Types>
 	class signal_base : public signal_base_base<MtPolicy> {
-
 	public:
-		typedef std::vector<std::shared_ptr<connection_base<MtPolicy,Types...>>> connections_type;
-
-		signal_base(){
-		}
+		typedef std::list<std::shared_ptr<connection_base<MtPolicy,Types...>>> connections_type;
+		signal_base(){ }
 
 		signal_base(const signal_base & s) : signal_base_base<MtPolicy>(s){
 			lock_block<MtPolicy> lock(const_cast<signal_base<MtPolicy,Types...> *>(&s));
@@ -241,23 +231,21 @@ namespace sigslot {
 		connections_type connected_slots_;
 
 		void slot_disconnect_nolock(has_slots<MtPolicy> * pslot) override{
-			std::vector<typename connections_type::iterator> tmp_delete;
-			for (auto it = connected_slots_.begin(); it != connected_slots_.end(); ++it) {
-				if ((*it)->getdest() == pslot) {
-					tmp_delete.push_back(it);
+			for(auto it = connected_slots_.begin();it != connected_slots_.end();) {
+				if((*it)->getdest() == pslot) {
+					it = connected_slots_.erase(it);
+				} else {
+					++it;
 				}
-			}
-			for (auto && i : tmp_delete) {
-				connected_slots_.erase(i);
 			}
 		}
 	};
 
 	template <typename MtPolicy>
 	class signal_base0 : public signal_base_base<MtPolicy> {
-		friend 	has_slots<MtPolicy>;
+		friend has_slots<MtPolicy>;
 	public:
-		typedef std::vector<std::shared_ptr<connection_base0<MtPolicy>>> connections_type;
+		typedef std::list<std::shared_ptr<connection_base0<MtPolicy>>> connections_type;
 		signal_base0(){ }
 
 		signal_base0(const signal_base0 & s) : signal_base_base<MtPolicy>(s){
@@ -296,12 +284,12 @@ namespace sigslot {
 			}
 		}
 
-		 void slot_disconnect(has_slots<MtPolicy> * pslot) override{
+		void slot_disconnect(has_slots<MtPolicy> * pslot) override{
 			lock_block<MtPolicy> lock(this);
 			slot_disconnect_nolock(pslot);
 		}
 
-		 void slot_duplicate(const has_slots<MtPolicy> * oldtarget,has_slots<MtPolicy> * newtarget) override{
+		void slot_duplicate(const has_slots<MtPolicy> * oldtarget,has_slots<MtPolicy> * newtarget) override{
 			lock_block<MtPolicy> lock(this);
 			for(auto && connect : connected_slots_) {
 				if(connect->getdest() == oldtarget) {
@@ -314,14 +302,12 @@ namespace sigslot {
 		connections_type connected_slots_;
 
 		void slot_disconnect_nolock(has_slots<MtPolicy> * pslot) override{
-			std::vector<typename connections_type::iterator> tmp_delete;
-			for (auto it = connected_slots_.begin(); it != connected_slots_.end(); ++it) {
-				if ((*it)->getdest() == pslot) {
-					tmp_delete.push_back(it);
+			for(auto it = connected_slots_.begin();it != connected_slots_.end();) {
+				if((*it)->getdest() == pslot) {
+					it = connected_slots_.erase(it);
+				} else {
+					++it;
 				}
-			}
-			for (auto && i : tmp_delete) {
-				connected_slots_.erase(i);
 			}
 		}
 	};
@@ -336,7 +322,8 @@ namespace sigslot {
 		void connect(DestType * pclass,void (DestType::*pmemfun)(Types ...)){
 			lock_block<MtPolicy> lock(this);
 			std::function<void(DestType *,Types ...)> fun(pmemfun);
-			signal_base<MtPolicy,Types...>::connected_slots_.emplace_back(new connection<DestType, MtPolicy, Types...>(pclass, fun));
+			signal_base<MtPolicy,Types...>::connected_slots_.emplace_back(
+				new connection<DestType,MtPolicy,Types...>(pclass, fun));
 			pclass->signal_connect(this);
 		}
 
@@ -362,7 +349,7 @@ namespace sigslot {
 		void connect(DestType * pclass,void (DestType::*pmemfun)()){
 			lock_block<MtPolicy> lock(this);
 			std::function<void(DestType *)> fun(pmemfun);
-			signal_base0<MtPolicy>::connected_slots_.emplace_back(new connection0<DestType, MtPolicy>(pclass, fun));
+			signal_base0<MtPolicy>::connected_slots_.emplace_back(new connection0<DestType,MtPolicy>(pclass, fun));
 			pclass->signal_connect(this);
 		}
 
@@ -383,35 +370,36 @@ namespace sigslot {
 		typedef std::set<signal_base_base<MtPolicy> *> sender_set;
 		typedef typename sender_set::const_iterator const_iterator;
 	public:
-		has_slots() { }
+		has_slots(){ }
 
-		has_slots(const has_slots & hs) : MtPolicy(hs) {
+		has_slots(const has_slots & hs) : MtPolicy(hs){
 			lock_block<MtPolicy> lock(const_cast<has_slots<MtPolicy> *>(&hs));
 			senders_.insert(hs.senders_.begin(), hs.senders_.end());
 		}
 
-		virtual ~has_slots() {
+		virtual ~has_slots(){
 			disconnect_all();
 		}
 
-		void disconnect_all() {
+		void disconnect_all(){
 			lock_block<MtPolicy> lock(this);
-			for (auto && sender : senders_) {
+			for(auto && sender : senders_) {
 				sender->slot_disconnect(this);
 			}
 
 			senders_.clear();
 		}
 
-		void signal_connect(signal_base_base<MtPolicy> * sender) {
+		void signal_connect(signal_base_base<MtPolicy> * sender){
 			lock_block<MtPolicy> lock(this);
 			senders_.insert(sender);
 		}
 
-		void signal_disconnect(signal_base_base<MtPolicy> * sender) {
+		void signal_disconnect(signal_base_base<MtPolicy> * sender){
 			lock_block<MtPolicy> lock(this);
 			senders_.erase(sender);
 		}
+
 	private:
 		sender_set senders_;
 	};
@@ -421,33 +409,34 @@ namespace sigslot {
 		typedef std::set<signal_base_base<multi_threaded_global> *> sender_set;
 		typedef sender_set::const_iterator const_iterator;
 	public:
-		has_slots() { }
+		has_slots(){ }
 
-		has_slots(const has_slots & hs) : multi_threaded_global(hs) {
+		has_slots(const has_slots & hs) : multi_threaded_global(hs){
 			lock_block<multi_threaded_global> lock(const_cast<has_slots<multi_threaded_global> *>(&hs));
 			senders_.insert(hs.senders_.begin(), hs.senders_.end());
 		}
 
-		virtual ~has_slots() {
+		virtual ~has_slots(){
 			disconnect_all();
 		}
 
-		void disconnect_all() {
+		void disconnect_all(){
 			lock_block<multi_threaded_global> lock(this);
-			for (auto && sender : senders_) {
+			for(auto && sender : senders_) {
 				sender->slot_disconnect_nolock(this);
 			}
 
 			senders_.clear();
 		}
 
-		void signal_connect(signal_base_base<multi_threaded_global> * sender) {
+		void signal_connect(signal_base_base<multi_threaded_global> * sender){
 			senders_.insert(sender);
 		}
 
-		void signal_disconnect(signal_base_base<multi_threaded_global> * sender) {
+		void signal_disconnect(signal_base_base<multi_threaded_global> * sender){
 			senders_.erase(sender);
 		}
+
 	private:
 		sender_set senders_;
 	};
